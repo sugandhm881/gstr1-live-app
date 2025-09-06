@@ -19,8 +19,7 @@ SHEET_PASSWORD = "Sugandh@1998"
 
 STATE_MAP = { "JAMMU & KASHMIR": "01-Jammu & Kashmir", "JAMMU AND KASHMIR": "01-Jammu & Kashmir", "HIMACHAL PRADESH": "02-Himachal Pradesh", "PUNJAB": "03-Punjab", "CHANDIGARH": "04-Chandigarh", "UTTARAKHAND": "05-Uttarakhand", "HARYANA": "06-Haryana", "DELHI": "07-Delhi", "RAJASTHAN": "08-Rajasthan", "UTTAR PRADESH": "09-Uttar Pradesh", "BIHAR": "10-Bihar", "SIKKIM": "11-Sikkim", "ARUNACHAL PRADESH": "12-Arunachal Pradesh", "NAGALAND": "13-Nagaland", "MANIPUR": "14-Manipur", "MIZORAM": "15-Mizoram", "TRIPURA": "16-Tripura", "MEGHALAYA": "17-Meghalaya", "ASSAM": "18-Assam", "WEST BENGAL": "19-West Bengal", "JHARKHAND": "20-Jharkhand", "ODISHA": "21-Odisha", "CHHATTISGARH": "22-Chhattisgarh", "MADHYA PRADESH": "23-Madhya Pradesh", "GUJARAT": "24-Gujarat", "DAMAN & DIU": "25-Daman & Diu", "DADRA & NAGAR HAVELI & DAMAN & DIU": "26-Dadra & Nagar Haveli & Daman & Diu", "MAHARASHTRA": "27-Maharashtra", "KARNATAKA": "29-Karnataka", "GOA": "30-Goa", "LAKSHDWEEP": "31-Lakshdweep", "KERALA": "32-Kerala", "TAMIL NADU": "33-Tamil Nadu", "PUDUCHERRY": "34-Puducherry", "ANDAMAN & NICOBAR ISLANDS": "35-Andaman & Nicobar Islands", "TELANGANA": "36-Telangana", "ANDHRA PRADESH": "37-Andhra Pradesh", "LADAKH": "38-Ladakh", "OTHER TERRITORY": "97-Other Territory"}
 
-# --- NEW: Header Mapping for Flexibility ---
-# Define standard internal names and possible variations from source files.
+# --- Header Mapping for Flexibility ---
 AMAZON_COLUMN_MAP = {
     'ship_to_state': ['ship to state', 'state'],
     'taxable_value': ['tax exclusive gross', 'taxable value'],
@@ -28,16 +27,16 @@ AMAZON_COLUMN_MAP = {
     'igst': ['igst tax'],
     'cgst': ['cgst tax'],
     'sgst': ['sgst tax'],
-    # Optional columns
-    'transaction_type': ['transaction type'],
+    # Optional columns for robust filtering
+    'transaction_status': ['transaction type', 'transaction status', 'order status'],
     'cess': ['compensatory cess tax', 'cess']
 }
 
 SHOPIFY_COLUMN_MAP = {
     'state': ['address state', 'shipping province', 'state'],
     'order_total': ['order total', 'total'],
-    # Optional columns
-    'order_status': ['order status', 'status', 'fulfillment status'],
+    # Optional columns for robust filtering
+    'financial_status': ['order status', 'status', 'fulfillment status', 'financial status'],
     'product_name': ['product name', 'item name'],
     'taxable_amount': ['taxable amount']
 }
@@ -49,29 +48,21 @@ def to_numeric(series):
     return pd.to_numeric(series, errors='coerce').fillna(0)
 
 def find_and_rename_columns(df, column_map):
-    """
-    Finds columns based on possible names, renames them to a standard,
-    and checks for missing mandatory columns.
-    """
     rename_dict = {}
     df_columns_lower = {col.lower().strip(): col for col in df.columns}
 
     for standard_name, possible_names in column_map.items():
-        found = False
         for possible_name in possible_names:
             if possible_name in df_columns_lower:
                 rename_dict[df_columns_lower[possible_name]] = standard_name
-                found = True
                 break
     
     df.rename(columns=rename_dict, inplace=True)
     
-    # Validate that mandatory columns now exist
-    mandatory_columns = [std_name for std_name, variations in column_map.items() if not std_name.startswith(('transaction_type', 'cess', 'order_status', 'product_name', 'taxable_amount'))]
+    mandatory_columns = [std_name for std_name, variations in column_map.items() if not std_name.startswith(('transaction_status', 'cess', 'financial_status', 'product_name', 'taxable_amount'))]
     missing_cols = [col for col in mandatory_columns if col not in df.columns]
     
     if missing_cols:
-        # Report the user-friendly names of the missing columns
         missing_friendly_names = [column_map[col][0] for col in missing_cols]
         raise ValueError(f"Missing required columns: {', '.join(missing_friendly_names)}")
     
@@ -81,8 +72,13 @@ def find_and_rename_columns(df, column_map):
 def process_amazon_data(df):
     df = find_and_rename_columns(df, AMAZON_COLUMN_MAP)
 
-    if 'transaction_type' in df.columns:
-        df = df[df['transaction_type'].str.upper() != 'CANCEL'].copy()
+    # --- Robust Filtering Logic ---
+    if 'transaction_status' in df.columns:
+        # Define keywords that indicate a transaction should be excluded
+        NEGATIVE_STATUSES = ['CANCEL', 'REFUND', 'RETURN']
+        pattern = '|'.join(NEGATIVE_STATUSES)
+        # Keep rows that DO NOT contain any of the negative keywords
+        df = df[~df['transaction_status'].str.contains(pattern, case=False, na=False)].copy()
     
     for col in ["taxable_value", "total_tax", "igst", "cgst", "sgst", "cess"]:
         if col in df.columns:
@@ -109,10 +105,15 @@ def process_amazon_data(df):
 def process_shopify_data(df):
     df = find_and_rename_columns(df, SHOPIFY_COLUMN_MAP)
 
+    # --- Robust Filtering Logic ---
     if 'product_name' in df.columns:
         df = df.dropna(subset=['product_name']).copy()
-    if 'order_status' in df.columns:
-        df = df[df['order_status'].str.upper() != 'CANCELLED'].copy()
+    if 'financial_status' in df.columns:
+        # Define keywords that indicate a transaction should be excluded
+        NEGATIVE_STATUSES = ['CANCELLED', 'REFUNDED', 'VOIDED', 'RETURNED']
+        pattern = '|'.join(NEGATIVE_STATUSES)
+        # Keep rows that DO NOT contain any of the negative keywords
+        df = df[~df['financial_status'].str.contains(pattern, case=False, na=False)].copy()
     
     df['order_total'] = to_numeric(df['order_total'])
     df['Place Of Supply'] = df['state'].apply(get_formatted_state)
@@ -174,7 +175,7 @@ def write_excel_sheet(writer, sheet_name, df, is_tcs=False):
             worksheet.set_column('D:E', None, money_format)
 
     signature_row = len(df) + 3
-    worksheet.write(signature_row, signature_col_index, "Report Generated by Sugandh Mishra - Automated GSTR1 B2C Tool", sig_format)
+    worksheet.write(signature_row, signature_col_index, "Report Generated by Sugandh Mishra - Automated GSTR Tool", sig_format)
 
     protection_options = {'autofilter': True, 'sort': True, 'format_cells': True, 'format_columns': True, 'format_rows': True, 'insert_rows': True, 'delete_rows': True, 'objects': True, 'scenarios': True}
     worksheet.protect(SHEET_PASSWORD, protection_options)
@@ -225,4 +226,3 @@ def process_files():
 
 if __name__ == '__main__':
     app.run(debug=True)
-
