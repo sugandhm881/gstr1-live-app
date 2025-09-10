@@ -1,0 +1,6 @@
+# Now run the main sequence
+git add .
+git commit -m "Initial commit: Add application files"
+git branch -M main
+git pull origin main --allow-unrelated-histories
+git push -u origin main
