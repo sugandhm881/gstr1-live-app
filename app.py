@@ -74,10 +74,14 @@ AMAZON_COLUMN_MAP = {
     'igst': ['igst tax'], 'cgst': ['cgst tax'], 'sgst': ['sgst tax'],
     'transaction_status': ['transaction type', 'transaction status', 'order status'], 'cess': ['compensatory cess tax', 'cess']
 }
+# --- update SHOPIFY_COLUMN_MAP to include shipment status ---
 SHOPIFY_COLUMN_MAP = {
-    'state': ['address state', 'shipping province', 'state'], 'order_total': ['order total', 'total'],
+    'state': ['address state', 'shipping province', 'state'],
+    'order_total': ['order total', 'total'],
     'financial_status': ['order status', 'status', 'fulfillment status', 'financial status'],
-    'product_name': ['product name', 'item name'], 'taxable_amount': ['taxable amount']
+    'product_name': ['product name', 'item name'],
+    'taxable_amount': ['taxable amount'],
+    'shipment_status': ['shipment status', 'shipment_status', 'shipment status (name)', 'shipping status']
 }
 FLIPKART_COLUMN_MAP = {
     'seller_gstin': ['seller gstin'],
@@ -148,6 +152,13 @@ def process_shopify_data(df):
     if 'product_name' in df.columns: df = df.dropna(subset=['product_name']).copy()
     if 'financial_status' in df.columns:
         df = df[~df['financial_status'].str.contains('CANCELLED|REFUNDED|VOIDED|RETURNED', case=False, na=False)].copy()
+
+    # NEW: Exclude orders based on shipment status
+    excluded_shipment_statuses = {'RTO_DELIVERED', 'NA', 'RTO_INITIATED', 'CANCELLED', 'EXCEPTION', 'N/A', ''}
+    if 'shipment_status' in df.columns:
+        normalized_shipment_status = df['shipment_status'].fillna('NA').astype(str).str.upper().str.strip()
+        df = df[~normalized_shipment_status.isin(excluded_shipment_statuses)].copy()
+
     df['order_total'] = to_numeric(df['order_total'])
     df['Place Of Supply'] = df['state'].apply(get_formatted_state)
     if 'taxable_amount' in df.columns: df['taxable_amount'] = to_numeric(df.get('taxable_amount'))

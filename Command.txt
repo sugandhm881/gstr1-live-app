@@ -1,4 +1,5 @@
 # Now run the main sequence
+cd GSTR1_Final_App
 git add .
 git commit -m "Initial commit: Add application files"
 git branch -M main
