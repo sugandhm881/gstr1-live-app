@@ -10,7 +10,7 @@ app = Flask(__name__)
 # --- Constants & Helpers ---
 SELLER_STATE = "HARYANA"
 FORMATTED_SELLER_STATE = "06-Haryana"
-AMAZON_GSTIN = "06AABCB2901D1CX" # Kept as a default/fallback
+AMAZON_GSTIN = "06AABCB2901D1CX" 
 AMAZON_NAME = "Amazon"
 SHOPIFY_GSTIN = "29AAYCS6474K1Z5"
 SHOPIFY_NAME = "Shopify"
@@ -18,7 +18,7 @@ FLIPKART_NAME = "Flipkart"
 TCS_NATURE_OF_SUPPLY = "Liable to collect tax u/s 52(TCS)"
 SHEET_PASSWORD = "Sugandh@1998"
 
-# --- ### ROBUST STATE MAP (Full Formatting) ### ---
+# --- ROBUST STATE MAP (Full Formatting) ---
 STATE_MAP = {
     "JAMMU AND KASHMIR": "01-Jammu & Kashmir", "LADAKH": "38-Ladakh",
     "HIMACHAL PRADESH": "02-Himachal Pradesh", "PUNJAB": "03-Punjab",
@@ -69,23 +69,32 @@ def get_formatted_state(state_name):
 
 # --- Header Mapping for Flexibility ---
 AMAZON_COLUMN_MAP = {
-    'seller_gstin': ['seller gstin', 'merchant gstin'], 'ship_to_state': ['ship to state', 'state'],
-    'taxable_value': ['tax exclusive gross', 'taxable value'], 'total_tax': ['total tax amount', 'total tax'],
-    'igst': ['igst tax'], 'cgst': ['cgst tax'], 'sgst': ['sgst tax'],
+    'seller_gstin': ['seller gstin', 'merchant gstin'], 'ship_to_state': ['ship to state', 'state', 'shipping state'],
+    'taxable_value': ['tax exclusive gross', 'taxable value', 'net sales'], 'total_tax': ['total tax amount', 'total tax'],
+    'igst': ['igst tax', 'igst amount'], 'cgst': ['cgst tax', 'cgst amount'], 'sgst': ['sgst tax', 'sgst amount'],
     'transaction_status': ['transaction type', 'transaction status', 'order status'], 'cess': ['compensatory cess tax', 'cess']
 }
-# --- update SHOPIFY_COLUMN_MAP to include shipment status ---
+
+# --- UPDATED: SHOPIFY MAP (Matches Amazon Structure) ---
 SHOPIFY_COLUMN_MAP = {
-    'state': ['address state', 'shipping province', 'state'],
-    'order_total': ['order total', 'total'],
-    'financial_status': ['order status', 'status', 'fulfillment status', 'financial status'],
-    'product_name': ['product name', 'item name'],
-    'taxable_amount': ['taxable amount'],
-    'shipment_status': ['shipment status', 'shipment_status', 'shipment status (name)', 'shipping status']
+    'seller_gstin': ['seller gstin', 'merchant gstin'], 
+    'state': ['ship to state', 'shipping province', 'address state', 'state', 'billing state'],
+    # Financials matching Amazon
+    'taxable_value': ['tax exclusive gross', 'taxable value', 'net sales', 'subtotal'],
+    'total_tax': ['total tax amount', 'total tax', 'tax amount', 'tax'],
+    'igst': ['igst tax', 'igst amount', 'igst'],
+    'cgst': ['cgst tax', 'cgst amount', 'cgst'],
+    'sgst': ['sgst tax', 'sgst amount', 'sgst'],
+    'cess': ['compensatory cess tax', 'cess amount', 'cess'],
+    # Status columns
+    'financial_status': ['transaction type', 'financial status', 'fulfillment status', 'status'],
+    'shipment_status': ['shipment status', 'shipping status'],
+    'product_name': ['product name', 'item name', 'lineitem name']
 }
+
 FLIPKART_COLUMN_MAP = {
     'seller_gstin': ['seller gstin'],
-    'billing_state': ["customer's billing state"], # --- USE BILLING STATE ---
+    'billing_state': ["customer's billing state"], 
     'delivery_state': ["customer's delivery state"], 
     'shipped_from_state': ['order shipped from (state)'],
     'taxable_value': ["taxable value (final invoice amount -taxes)", "taxable value"], 'igst': ["igst amount"],
@@ -97,6 +106,13 @@ FLIPKART_COLUMN_MAP = {
 def to_numeric(series):
     return pd.to_numeric(series, errors='coerce').fillna(0)
 
+def snap_to_gst_rate(rate):
+    if pd.isna(rate): return 0
+    slabs = [0, 5, 12, 18, 28]
+    closest_slab = min(slabs, key=lambda x: abs(x - rate))
+    if abs(closest_slab - rate) < 2: return closest_slab
+    return round(rate, 1)
+
 def find_and_rename_columns(df, column_map):
     rename_dict = {}
     df_columns_lower = {col.lower().strip(): col for col in df.columns}
@@ -107,13 +123,11 @@ def find_and_rename_columns(df, column_map):
                 rename_dict[original_col_name] = standard_name
                 break
     df.rename(columns=rename_dict, inplace=True)
-    mandatory_columns = [std for std in column_map if not std.startswith(('trans', 'cess', 'finan', 'prod', 'taxable_am', 'event', 'delivery_state'))] # delivery_state is not critical
+    mandatory_columns = [std for std in column_map if not std.startswith(('trans', 'cess', 'finan', 'prod', 'taxable_am', 'event', 'delivery_state', 'shipment'))]
     if 'seller_gstin' not in df.columns and 'seller_gstin' in mandatory_columns:
         mandatory_columns.remove('seller_gstin')
     missing_cols = [col for col in mandatory_columns if col not in df.columns]
-    if missing_cols:
-        missing_friendly_names = [column_map[c][0] for c in missing_cols]
-        raise ValueError(f"Missing required columns: {', '.join(missing_friendly_names)}")
+    # We pass on missing cols here as some might be optional depending on logic
     return df
 
 def process_amazon_data(df):
@@ -122,24 +136,30 @@ def process_amazon_data(df):
     if 'seller_gstin' not in df.columns:
         df['seller_gstin'] = AMAZON_GSTIN
     else:
-        df['seller_gstin'] = df['seller_gstin'].astype(str).str.strip().str.upper()
+        df['seller_gstin'] = df['seller_gstin'].fillna(AMAZON_GSTIN).astype(str).str.strip().str.upper()
+    
     financial_cols = ["taxable_value", "total_tax", "igst", "cgst", "sgst", "cess"]
     for col in financial_cols:
-        if col in df.columns: df[col] = to_numeric(df[col])
+        if col not in df.columns: df[col] = 0.0
+        else: df[col] = to_numeric(df[col])
+        
     if 'transaction_status' in df.columns:
         is_refund = df['transaction_status'].str.contains('CANCEL|REFUND|RETURN', case=False, na=False)
         for col in financial_cols:
-            if col in df.columns:
-                df.loc[is_refund, col] = -df.loc[is_refund, col].abs()
-                df.loc[~is_refund, col] = df.loc[~is_refund, col].abs()
+            df.loc[is_refund, col] = -df.loc[is_refund, col].abs()
+            df.loc[~is_refund, col] = df.loc[~is_refund, col].abs()
+            
     for gstin, group_df in df.groupby('seller_gstin'):
         df_gstin = group_df.copy()
         df_gstin['Place Of Supply'] = df_gstin['ship_to_state'].apply(get_formatted_state)
-        df_gstin['Rate'] = np.where(df_gstin['taxable_value'].abs() > 0, round((df_gstin['total_tax'].abs() / df_gstin['taxable_value'].abs()) * 100, 2), 0)
+        df_gstin['Rate'] = np.where(df_gstin['taxable_value'].abs() > 0, (df_gstin['total_tax'].abs() / df_gstin['taxable_value'].abs()) * 100, 0)
+        df_gstin['Rate'] = df_gstin['Rate'].apply(snap_to_gst_rate)
+        
         b2cs_summary = df_gstin.groupby(['Place Of Supply', 'Rate']).agg(Taxable_Value=('taxable_value', 'sum')).reset_index()
-        b2cs_summary = b2cs_summary[b2cs_summary['Rate'] > 0].copy()
+        b2cs_summary = b2cs_summary[(b2cs_summary['Rate'] > 0) | (b2cs_summary['Taxable_Value'].abs() > 0)].copy()
         b2cs_summary['Cess_Amount'] = df_gstin['cess'].sum() if 'cess' in df_gstin.columns else 0
         b2cs_summary['E-Commerce GSTIN'] = gstin
+        
         tcs_summary = pd.DataFrame([{'Nature of Supply': TCS_NATURE_OF_SUPPLY, 'GSTIN of E-Commerce Operator': gstin,
             'E-Commerce Operator Name': AMAZON_NAME, 'Net value of supplies': df_gstin['taxable_value'].sum(),
             'Integrated tax': df_gstin['igst'].sum(), 'Central tax': df_gstin['cgst'].sum(),
@@ -147,43 +167,78 @@ def process_amazon_data(df):
         all_summaries.append({'gstin': gstin, 'b2cs': b2cs_summary, 'tcs': tcs_summary})
     return all_summaries
 
+# --- UPDATED: SHOPIFY PROCESSING LOGIC (Mirrors Amazon Logic) ---
 def process_shopify_data(df):
     df = find_and_rename_columns(df, SHOPIFY_COLUMN_MAP)
+    
     if 'product_name' in df.columns: df = df.dropna(subset=['product_name']).copy()
-    if 'financial_status' in df.columns:
-        df = df[~df['financial_status'].str.contains('CANCELLED|REFUNDED|VOIDED|RETURNED', case=False, na=False)].copy()
-
-    # NEW: Exclude orders based on shipment status
+    
+    # Exclude invalid shipment statuses
     excluded_shipment_statuses = {'RTO_DELIVERED', 'NA', 'RTO_INITIATED', 'CANCELLED', 'EXCEPTION', 'N/A', ''}
     if 'shipment_status' in df.columns:
-        normalized_shipment_status = df['shipment_status'].fillna('NA').astype(str).str.upper().str.strip()
-        df = df[~normalized_shipment_status.isin(excluded_shipment_statuses)].copy()
+        normalized_status = df['shipment_status'].fillna('NA').astype(str).str.upper().str.strip()
+        df = df[~normalized_status.isin(excluded_shipment_statuses)].copy()
 
-    df['order_total'] = to_numeric(df['order_total'])
-    df['Place Of Supply'] = df['state'].apply(get_formatted_state)
-    if 'taxable_amount' in df.columns: df['taxable_amount'] = to_numeric(df.get('taxable_amount'))
-    else: df['taxable_amount'] = round(df['order_total'] / 1.18, 2)
-    df['Tax Value'] = round(df['order_total'] - df['taxable_amount'], 2)
-    df['Rate'] = np.where(df['taxable_amount'] > 0, round((df['Tax Value'] / df['taxable_amount']) * 100, 2), 0)
-    is_intra_state = df['Place Of Supply'] == FORMATTED_SELLER_STATE
-    df['IGST'] = np.where(is_intra_state, 0, df['Tax Value'])
-    df['CGST'] = np.where(is_intra_state, df['Tax Value'] / 2, 0)
-    df['SGST'] = np.where(is_intra_state, df['Tax Value'] / 2, 0)
-    b2cs_summary = df.groupby(['Place Of Supply', 'Rate']).agg(Taxable_Value=('taxable_amount', 'sum')).reset_index()
-    b2cs_summary = b2cs_summary[b2cs_summary['Rate'] > 0].copy()
-    b2cs_summary['Cess_Amount'] = 0.0
-    b2cs_summary['E-Commerce GSTIN'] = SHOPIFY_GSTIN
-    tcs_summary = pd.DataFrame([{'Nature of Supply': TCS_NATURE_OF_SUPPLY, 'GSTIN of E-Commerce Operator': SHOPIFY_GSTIN,
-        'E-Commerce Operator Name': SHOPIFY_NAME, 'Net value of supplies': df['taxable_amount'].sum(), 'Integrated tax': df['IGST'].sum(),
-        'Central tax': df['CGST'].sum(), 'State/UT tax': df['SGST'].sum(), 'Cess': 0.0}])
-    return [{'gstin': SHOPIFY_GSTIN, 'b2cs': b2cs_summary, 'tcs': tcs_summary}]
+    # Default GSTIN
+    if 'seller_gstin' not in df.columns:
+        df['seller_gstin'] = SHOPIFY_GSTIN
+    else:
+        df['seller_gstin'] = df['seller_gstin'].fillna(SHOPIFY_GSTIN).astype(str).str.strip().str.upper()
 
-def snap_to_gst_rate(rate):
-    if pd.isna(rate): return 0
-    slabs = [0, 5, 12, 18, 28]
-    closest_slab = min(slabs, key=lambda x: abs(x - rate))
-    if abs(closest_slab - rate) < 2: return closest_slab
-    return round(rate, 1)
+    # Numeric Conversion
+    financial_cols = ["taxable_value", "total_tax", "igst", "cgst", "sgst", "cess"]
+    for col in financial_cols:
+        if col not in df.columns: df[col] = 0.0
+        else: df[col] = to_numeric(df[col])
+
+    # Handle Refunds (Negative values)
+    if 'financial_status' in df.columns:
+        is_refund = df['financial_status'].str.contains('REFUND|CANCEL|RETURN|VOID', case=False, na=False)
+        for col in financial_cols:
+            df.loc[is_refund, col] = -df.loc[is_refund, col].abs()
+            df.loc[~is_refund, col] = df.loc[~is_refund, col].abs()
+
+    all_summaries = []
+    
+    for gstin, df_gstin in df.groupby('seller_gstin'):
+        df_gstin = df_gstin.copy()
+        
+        # Determine Place of Supply
+        df_gstin['Place Of Supply'] = df_gstin['state'].apply(get_formatted_state)
+        
+        # Calculate Rate (Tax / Taxable * 100)
+        df_gstin['Rate'] = np.where(
+            df_gstin['taxable_value'].abs() > 0, 
+            (df_gstin['total_tax'].abs() / df_gstin['taxable_value'].abs()) * 100, 
+            0
+        )
+        df_gstin['Rate'] = df_gstin['Rate'].apply(snap_to_gst_rate)
+
+        # Auto-calculate IGST/CGST/SGST if missing but Total Tax exists
+        is_intra = df_gstin['Place Of Supply'] == FORMATTED_SELLER_STATE
+        needs_split = (df_gstin['igst'] == 0) & (df_gstin['cgst'] == 0) & (df_gstin['sgst'] == 0) & (df_gstin['total_tax'].abs() > 0)
+        
+        df_gstin.loc[needs_split & is_intra, 'cgst'] = df_gstin.loc[needs_split, 'total_tax'] / 2
+        df_gstin.loc[needs_split & is_intra, 'sgst'] = df_gstin.loc[needs_split, 'total_tax'] / 2
+        df_gstin.loc[needs_split & ~is_intra, 'igst'] = df_gstin.loc[needs_split, 'total_tax']
+
+        # Aggregation
+        b2cs_summary = df_gstin.groupby(['Place Of Supply', 'Rate']).agg(
+            Taxable_Value=('taxable_value', 'sum')
+        ).reset_index()
+        
+        b2cs_summary = b2cs_summary[(b2cs_summary['Rate'] > 0) | (b2cs_summary['Taxable_Value'].abs() > 0)].copy()
+        b2cs_summary['Cess_Amount'] = df_gstin['cess'].sum()
+        b2cs_summary['E-Commerce GSTIN'] = gstin
+        
+        tcs_summary = pd.DataFrame([{'Nature of Supply': TCS_NATURE_OF_SUPPLY, 'GSTIN of E-Commerce Operator': gstin,
+            'E-Commerce Operator Name': SHOPIFY_NAME, 'Net value of supplies': df_gstin['taxable_value'].sum(),
+            'Integrated tax': df_gstin['igst'].sum(), 'Central tax': df_gstin['cgst'].sum(),
+            'State/UT tax': df_gstin['sgst'].sum(), 'Cess': df_gstin['cess'].sum()}])
+        
+        all_summaries.append({'gstin': gstin, 'b2cs': b2cs_summary, 'tcs': tcs_summary})
+
+    return all_summaries
 
 def process_flipkart_data(df):
     df = find_and_rename_columns(df, FLIPKART_COLUMN_MAP)
@@ -204,8 +259,6 @@ def process_flipkart_data(df):
 
     for gstin, df_gstin in df.groupby('seller_gstin'):
         df_gstin = df_gstin.copy()
-        
-        # --- DEFINITIVE FIX: Use BILLING STATE as Place of Supply ---
         df_gstin['shipped_from_state_fmt'] = df_gstin['shipped_from_state'].apply(get_formatted_state)
         df_gstin['Place Of Supply'] = df_gstin['billing_state'].apply(get_formatted_state)
         df_gstin['is_intra'] = df_gstin['shipped_from_state_fmt'] == df_gstin['Place Of Supply']
@@ -230,7 +283,7 @@ def process_flipkart_data(df):
             df_gstin['sgst'] = np.where(df_gstin['is_intra'] == True, df_gstin['total_tax'] / 2, 0)
             
         b2cs_summary = df_gstin.groupby(['Place Of Supply', 'Rate']).agg(Taxable_Value=('taxable_value', 'sum')).reset_index()
-        b2cs_summary = b2cs_summary[(b2cs_summary['Rate'] > 0) & (b2cs_summary['Taxable_Value'] > 0)].copy()
+        b2cs_summary = b2cs_summary[(b2cs_summary['Rate'] > 0) | (b2cs_summary['Taxable_Value'].abs() > 0)].copy()
         b2cs_summary['Cess_Amount'] = df_gstin['cess'].sum() if 'cess' in df_gstin.columns else 0
         b2cs_summary['E-Commerce GSTIN'] = gstin
         
@@ -294,14 +347,20 @@ def process_files():
             num_summaries_generated = 0
             for file_key, (processor, platform_name) in file_processors.items():
                 if files.get(file_key):
-                    df = pd.read_csv(files[file_key]) if files[file_key].filename.lower().endswith('.csv') else pd.read_excel(files[file_key])
+                    if files[file_key].filename.lower().endswith('.csv'):
+                        df = pd.read_csv(files[file_key])
+                    else:
+                        df = pd.read_excel(files[file_key])
+                        
                     summaries = processor(df)
                     num_summaries_generated += len(summaries)
                     for summary in summaries:
                         b2cs, tcs, gstin = summary['b2cs'], summary['tcs'], summary['gstin']
                         tcs['Platform'] = platform_name
-                        write_excel_sheet(writer, f"B2CS_{platform_name}_{gstin[:6]}", b2cs.drop(columns=['E-Commerce GSTIN']), is_tcs=False)
-                        write_excel_sheet(writer, f"TCS_{platform_name}_{gstin[:6]}", tcs, is_tcs=True)
+                        
+                        safe_gstin = gstin[:6] if gstin else "UNKNOWN"
+                        write_excel_sheet(writer, f"B2CS_{platform_name}_{safe_gstin}", b2cs.drop(columns=['E-Commerce GSTIN'], errors='ignore'), is_tcs=False)
+                        write_excel_sheet(writer, f"TCS_{platform_name}_{safe_gstin}", tcs, is_tcs=True)
                         all_b2cs.append(b2cs)
                         all_tcs.append(tcs)
             
